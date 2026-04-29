@@ -547,9 +547,19 @@ hr{border:none;border-top:1px solid var(--border);margin:18px 0}
         <tbody id="albProdTb"></tbody>
       </table></div>
     </div>
-    <div class="btn-row no-print">
-      <button class="btn btn-ghost btn-sm" onclick="limpiarAlb()">✕ Limpiar</button>
-      <button class="btn btn-primary" onclick="generarAlbaran()">◻ Generar albarán</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:4px">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;padding:10px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);font-size:13px;color:var(--text2);font-weight:normal;text-transform:none;letter-spacing:0">
+        <input type="checkbox" id="chkMuestra" checked
+          style="width:16px;height:16px;accent-color:var(--blue-md);cursor:pointer;flex-shrink:0">
+        <span>
+          <strong style="color:var(--navy)">Muestra comercial valor "0"</strong>
+          <span style="display:block;font-size:11px;color:var(--text3)">Incluir la coletilla en el albarán</span>
+        </span>
+      </label>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="limpiarAlb()">✕ Limpiar</button>
+        <button class="btn btn-primary" onclick="generarAlbaran()">◻ Generar albarán</button>
+      </div>
     </div>
     <div id="albPreviewWrap"></div>
     <hr>
@@ -851,8 +861,8 @@ function gsCallJsonp(urlStr) {
     const timeout = setTimeout(() => {
       delete window[cbName];
       script.remove();
-      reject(new Error('JSONP timeout'));
-    }, 12000);
+      reject(new Error('JSONP timeout — el servidor no respondió en 8 segundos'));
+    }, 8000);
 
     window[cbName] = (data) => {
       clearTimeout(timeout);
@@ -879,31 +889,115 @@ async function testGSheets() {
   if (!inputUrl) { toast('Introduce la URL del Apps Script primero','err'); return; }
   GS_URL = inputUrl;
   setGsStatus('checking');
-  document.getElementById('gsStatusText').textContent = 'Probando conexión...';
+  const statusEl = document.getElementById('gsStatusText');
+  statusEl.textContent = 'Probando conexión...';
+
+  // Probar con fetch Y jsonp en paralelo — gana el que responda primero
+  let respondido = false;
+
+  const probarFetch = async () => {
+    try {
+      const url = new URL(GS_URL);
+      url.searchParams.set('action', 'ping');
+      const res = await fetch(url.toString(), { method:'GET', redirect:'follow', cache:'no-store' });
+      const text = await res.text();
+      if (text && !text.trim().startsWith('<')) {
+        const json = JSON.parse(text);
+        if (json.ok) return json;
+      }
+    } catch(e) {}
+    return null;
+  };
+
+  const probarJsonp = () => gsCallJsonp(
+    (() => { const u = new URL(GS_URL); u.searchParams.set('action','ping'); return u.toString(); })()
+  ).catch(() => null);
+
+  // Recoger respuestas de ambos métodos
+  let resultadoFetch = null;
+  let resultadoJsonp = null;
+  let rawRespuesta   = null;
+
+  // Fetch con log detallado
+  const probarFetchDetallado = async () => {
+    try {
+      const url = new URL(GS_URL);
+      url.searchParams.set('action', 'ping');
+      const res = await fetch(url.toString(), { method:'GET', redirect:'follow', cache:'no-store' });
+      const text = await res.text();
+      rawRespuesta = text;
+      console.log('[GS ping fetch] status:', res.status, 'respuesta:', text.slice(0,200));
+      if (!text || !text.trim()) return null;
+      if (text.trim().startsWith('<')) { console.warn('[GS] Respuesta HTML — requiere auth'); return null; }
+      try {
+        const json = JSON.parse(text);
+        console.log('[GS ping fetch] JSON:', json);
+        return json;
+      } catch(pe) { console.warn('[GS] No es JSON:', text.slice(0,100)); return null; }
+    } catch(e) {
+      console.warn('[GS ping fetch] Error:', e.message);
+      return null;
+    }
+  };
+
   try {
-    const r = await gsCall('ping');
-    if (r.ok) {
+    statusEl.textContent = 'Probando con fetch...';
+    resultadoFetch = await probarFetchDetallado();
+
+    if (!resultadoFetch || !resultadoFetch.ok) {
+      statusEl.textContent = 'Probando con JSONP...';
+      console.log('[GS] Fetch no devolvió ok, intentando JSONP...');
+      const urlJsonp = (() => { const u = new URL(GS_URL); u.searchParams.set('action','ping'); return u.toString(); })();
+      try {
+        resultadoJsonp = await Promise.race([
+          gsCallJsonp(urlJsonp),
+          new Promise((_,rej) => setTimeout(() => rej(new Error('timeout JSONP')), 10000))
+        ]);
+        console.log('[GS ping jsonp]', resultadoJsonp);
+      } catch(je) {
+        console.warn('[GS ping jsonp] Error:', je.message);
+      }
+    }
+
+    const resultado = (resultadoFetch?.ok && resultadoFetch) ||
+                      (resultadoJsonp?.ok && resultadoJsonp);
+
+    if (resultado) {
       GS_ONLINE = true;
       setGsStatus('online');
-      toast('✓ Conectado a Google Sheets (v' + (r.version||'?') + ')');
+      toast('✓ Conectado a Google Sheets (v' + (resultado.version||'?') + ')');
       guardarConfigGS();
       updateGsInfo();
+    } else {
+      // Diagnóstico detallado
+      let detalle = '';
+      if (rawRespuesta) {
+        if (rawRespuesta.trim().startsWith('<')) {
+          detalle = 'El servidor devuelve HTML (requiere login). Republica el Apps Script como "Cualquier usuario".';
+        } else if (rawRespuesta.includes('"error"')) {
+          detalle = 'Error del servidor: ' + rawRespuesta.slice(0,150);
+        } else if (rawRespuesta.trim()) {
+          detalle = 'Respuesta inesperada: ' + rawRespuesta.slice(0,100);
+        } else {
+          detalle = 'El servidor respondió vacío. Comprueba que el Apps Script está publicado.';
+        }
+      } else {
+        detalle = 'Sin respuesta. Verifica la URL y que el script esté publicado como "Cualquier usuario".';
+      }
+      throw new Error(detalle);
     }
   } catch(e) {
     GS_ONLINE = false;
     setGsStatus('offline');
-    let msg = e.message;
-    if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
-      msg = 'No se pudo conectar. Comprueba que el Apps Script está publicado como "Cualquier usuario".';
-    } else if (msg.includes('autenticación') || msg.includes('login')) {
-      msg = 'El script requiere login. En Apps Script → Implementar → cambia acceso a "Cualquier usuario".';
-    }
-    toast('Error: ' + msg, 'err');
-    console.error('[GS ping]', e);
+    toast('Error de conexión: ' + e.message, 'err');
+    console.error('[GS ping final]', e, 'raw:', rawRespuesta);
   }
 }
 async function cargarDesdeSheetsBtn() {
   if (!GS_URL) { toast('Configura la URL del Apps Script primero','err'); return; }
+  // Asegurar que GS_URL tiene la última URL del input
+  const _inputUrl = document.getElementById('gsUrl')?.value?.trim();
+  if (_inputUrl) GS_URL = _inputUrl;
   setGsStatus('checking');
   try {
     toast('Conectando con Google Sheets...');
@@ -1659,7 +1753,8 @@ function generarAlbaran() {
   movsSalida.forEach(m => DB.movimientos.push(m));
 
   // Guardar albarán
-  DB.albaranes.push({id:numAlb, fecha:new Date(), cliente:nombre, cif, dir, lineas});
+  const esMuestra = document.getElementById('chkMuestra')?.checked !== false;
+  DB.albaranes.push({id:numAlb, fecha:new Date(), cliente:nombre, cif, dir, lineas, esMuestra});
   guardarEnLS();
 
   toast('Albarán ' + numAlb + ' generado — ' + lineas.length + ' línea(s), stock descontado');
@@ -1722,7 +1817,7 @@ function mostrarPreviewAlb(id) {
       '<strong style="color:#003060">DNI / CIF:</strong> ' + (a.cif||'—') + '<br>' +
       '<strong style="color:#003060">Dirección:</strong> ' + dirHtml +
     '</div>' +
-    '<div style="background:#fffce6;border:1px solid #e8d840;border-radius:4px;padding:7px 12px;font-size:11px;color:#665500;margin-bottom:14px;font-style:italic">MUESTRA COMERCIAL VALOR "0"</div>' +
+    (a.esMuestra !== false ? '<div style="background:#fffce6;border:1px solid #e8d840;border-radius:4px;padding:7px 12px;font-size:11px;color:#665500;margin-bottom:14px;font-style:italic">MUESTRA COMERCIAL VALOR "0"</div>' : '') +
     '<table style="width:100%;border-collapse:collapse;margin-bottom:16px">' +
       '<thead><tr>' +
         '<th style="background:#003060;color:#fff;padding:8px 10px;text-align:left;font-size:11px;font-weight:700">DESCRIPCIÓN</th>' +
@@ -1770,7 +1865,7 @@ async function guardarAlbaranDrive() {
   const btn = document.getElementById('btnDrive');
   if (btn) { btn.textContent = '⟳ Guardando...'; btn.disabled = true; }
   try {
-    const r = await gsCall('guardarAlbaranPDF', { albaran: a });
+    const r = await gsCall('guardarAlbaranPDF', { albaran: a, esMuestra: a.esMuestra !== false });
     if (r.ok) {
       toast('✓ PDF guardado: ' + r.nombre + (r.url ? ' — <a href="'+r.url+'" target="_blank" style="color:var(--blue-lt)">Abrir</a>' : ''));
       if (btn) btn.textContent = '✓ Guardado en Drive';
@@ -1831,6 +1926,8 @@ function limpiarAlb() {
   ['albCli','albCliNuevo','albCif'].forEach(id => document.getElementById(id).value='');
   document.getElementById('albDir').value='';
   document.getElementById('albPreviewWrap').innerHTML='';
+  const chk = document.getElementById('chkMuestra');
+  if (chk) chk.checked = true; // reset a muestra por defecto
   renderAlbProd();
 }
 
