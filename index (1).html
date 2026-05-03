@@ -807,192 +807,49 @@ function loadGsConfig() {
 }
 
 async function gsCall(action, body={}) {
-  if (!GS_URL) throw new Error('Apps Script URL no configurada. Ve a Google Sheets en el menú.');
-
+  if (!GS_URL) throw new Error('Apps Script URL no configurada');
   const url = new URL(GS_URL);
   url.searchParams.set('action', action);
   if (Object.keys(body).length > 0) {
     url.searchParams.set('payload', JSON.stringify(body));
   }
-  const urlStr = url.toString();
-
-  // Intentar fetch normal primero
-  try {
-    const res = await fetch(urlStr, { method:'GET', redirect:'follow', cache:'no-store' });
-    const text = await res.text();
-    if (!text || !text.trim()) throw new Error('vacía');
-    if (text.trim().startsWith('<')) throw new Error('auth');
-    const json = JSON.parse(text);
-    if (json.error) throw new Error(json.error);
-    return json;
-  } catch(fetchErr) {
-    const msg = fetchErr.message || '';
-    // Si es error de red/CORS → intentar JSONP
-    if (msg === 'auth') {
-      throw new Error('El Apps Script requiere login. Republícalo como "Cualquier usuario".');
-    }
-    // Para lecturas: intentar JSONP (evita CORS completamente)
-    const isRead = ['ping','getMaestros','getMovimientos','getStock','getAlbaranes'].includes(action);
-    if (isRead || msg.includes('fetch') || msg.includes('network') || msg.includes('CORS') || msg.includes('Failed')) {
-      try {
-        return await gsCallJsonp(urlStr);
-      } catch(jsonpErr) {
-        console.warn('[GS] JSONP también falló:', jsonpErr.message);
-      }
-    }
-    // Para escrituras: no-cors como último recurso
-    const isWrite = ['addMovimiento','addAlbaran','addProducto','addCliente',
-                     'syncAll','actualizarStockLotes','guardarAlbaranPDF'].includes(action);
-    if (isWrite) {
-      try {
-        await fetch(urlStr, { method:'GET', mode:'no-cors', redirect:'follow', cache:'no-store' });
-        console.warn('[GS] ' + action + ' enviado sin confirmar (no-cors)');
-        return { ok: true, _noCors: true };
-      } catch(e2) {}
-    }
-    throw new Error('Sin conexión con Google Sheets: ' + fetchErr.message);
-  }
-}
-
-// JSONP — carga el script en un <script> tag, evita CORS completamente
-function gsCallJsonp(urlStr) {
-  return new Promise((resolve, reject) => {
-    const cbName = '_gsJsonp_' + Date.now();
-    const timeout = setTimeout(() => {
-      delete window[cbName];
-      script.remove();
-      reject(new Error('JSONP timeout — el servidor no respondió en 8 segundos'));
-    }, 8000);
-
-    window[cbName] = (data) => {
-      clearTimeout(timeout);
-      delete window[cbName];
-      script.remove();
-      if (data && data.error) reject(new Error(data.error));
-      else resolve(data);
-    };
-
-    const urlWithCb = urlStr + '&callback=' + cbName;
-    const script = document.createElement('script');
-    script.src = urlWithCb;
-    script.onerror = () => {
-      clearTimeout(timeout);
-      delete window[cbName];
-      script.remove();
-      reject(new Error('JSONP script error'));
-    };
-    document.head.appendChild(script);
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    redirect: 'follow',
   });
+  const text = await res.text();
+  if (!text || text.trim().startsWith('<')) {
+    throw new Error('El servidor requiere autenticación. Asegúrate de publicar el Apps Script como "Cualquier usuario".');
+  }
+  const json = JSON.parse(text);
+  if (json.error) throw new Error(json.error);
+  return json;
 }
+
+
 async function testGSheets() {
   const inputUrl = document.getElementById('gsUrl').value.trim();
-  if (!inputUrl) { toast('Introduce la URL del Apps Script primero','err'); return; }
+  if (!inputUrl) { toast('Introduce la URL del Apps Script primero', 'err'); return; }
   GS_URL = inputUrl;
   setGsStatus('checking');
-  const statusEl = document.getElementById('gsStatusText');
-  statusEl.textContent = 'Probando conexión...';
-
-  // Probar con fetch Y jsonp en paralelo — gana el que responda primero
-  let respondido = false;
-
-  const probarFetch = async () => {
-    try {
-      const url = new URL(GS_URL);
-      url.searchParams.set('action', 'ping');
-      const res = await fetch(url.toString(), { method:'GET', redirect:'follow', cache:'no-store' });
-      const text = await res.text();
-      if (text && !text.trim().startsWith('<')) {
-        const json = JSON.parse(text);
-        if (json.ok) return json;
-      }
-    } catch(e) {}
-    return null;
-  };
-
-  const probarJsonp = () => gsCallJsonp(
-    (() => { const u = new URL(GS_URL); u.searchParams.set('action','ping'); return u.toString(); })()
-  ).catch(() => null);
-
-  // Recoger respuestas de ambos métodos
-  let resultadoFetch = null;
-  let resultadoJsonp = null;
-  let rawRespuesta   = null;
-
-  // Fetch con log detallado
-  const probarFetchDetallado = async () => {
-    try {
-      const url = new URL(GS_URL);
-      url.searchParams.set('action', 'ping');
-      const res = await fetch(url.toString(), { method:'GET', redirect:'follow', cache:'no-store' });
-      const text = await res.text();
-      rawRespuesta = text;
-      console.log('[GS ping fetch] status:', res.status, 'respuesta:', text.slice(0,200));
-      if (!text || !text.trim()) return null;
-      if (text.trim().startsWith('<')) { console.warn('[GS] Respuesta HTML — requiere auth'); return null; }
-      try {
-        const json = JSON.parse(text);
-        console.log('[GS ping fetch] JSON:', json);
-        return json;
-      } catch(pe) { console.warn('[GS] No es JSON:', text.slice(0,100)); return null; }
-    } catch(e) {
-      console.warn('[GS ping fetch] Error:', e.message);
-      return null;
-    }
-  };
-
+  document.getElementById('gsStatusText').textContent = 'Probando conexión...';
   try {
-    statusEl.textContent = 'Probando con fetch...';
-    resultadoFetch = await probarFetchDetallado();
-
-    if (!resultadoFetch || !resultadoFetch.ok) {
-      statusEl.textContent = 'Probando con JSONP...';
-      console.log('[GS] Fetch no devolvió ok, intentando JSONP...');
-      const urlJsonp = (() => { const u = new URL(GS_URL); u.searchParams.set('action','ping'); return u.toString(); })();
-      try {
-        resultadoJsonp = await Promise.race([
-          gsCallJsonp(urlJsonp),
-          new Promise((_,rej) => setTimeout(() => rej(new Error('timeout JSONP')), 10000))
-        ]);
-        console.log('[GS ping jsonp]', resultadoJsonp);
-      } catch(je) {
-        console.warn('[GS ping jsonp] Error:', je.message);
-      }
-    }
-
-    const resultado = (resultadoFetch?.ok && resultadoFetch) ||
-                      (resultadoJsonp?.ok && resultadoJsonp);
-
-    if (resultado) {
+    const r = await gsCall('ping');
+    if (r.ok) {
       GS_ONLINE = true;
       setGsStatus('online');
-      toast('✓ Conectado a Google Sheets (v' + (resultado.version||'?') + ')');
+      toast('✓ Conectado a Google Sheets');
       guardarConfigGS();
       updateGsInfo();
-    } else {
-      // Diagnóstico detallado
-      let detalle = '';
-      if (rawRespuesta) {
-        if (rawRespuesta.trim().startsWith('<')) {
-          detalle = 'El servidor devuelve HTML (requiere login). Republica el Apps Script como "Cualquier usuario".';
-        } else if (rawRespuesta.includes('"error"')) {
-          detalle = 'Error del servidor: ' + rawRespuesta.slice(0,150);
-        } else if (rawRespuesta.trim()) {
-          detalle = 'Respuesta inesperada: ' + rawRespuesta.slice(0,100);
-        } else {
-          detalle = 'El servidor respondió vacío. Comprueba que el Apps Script está publicado.';
-        }
-      } else {
-        detalle = 'Sin respuesta. Verifica la URL y que el script esté publicado como "Cualquier usuario".';
-      }
-      throw new Error(detalle);
     }
   } catch(e) {
     GS_ONLINE = false;
     setGsStatus('offline');
-    toast('Error de conexión: ' + e.message, 'err');
-    console.error('[GS ping final]', e, 'raw:', rawRespuesta);
+    toast('Error: ' + e.message, 'err');
+    console.error('[GS]', e);
   }
 }
+
 async function cargarDesdeSheetsBtn() {
   if (!GS_URL) { toast('Configura la URL del Apps Script primero','err'); return; }
   // Asegurar que GS_URL tiene la última URL del input
