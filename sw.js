@@ -4,13 +4,13 @@
 // ════════════════════════════════════════════════════
 
 const CACHE_NAME = 'indian-ecotrade-erp-v1';
-const APP_SHELL  = 'index.html';
+const APP_SHELL  = 'StockTostado_IndianEcotrade.html';
 
 // Recursos a cachear al instalar
 const CACHE_URL  = 'https://jlozano-arch.github.io/stock-tostado-indian';
 const PRECACHE = [
   CACHE_URL + '/',
-  CACHE_URL + '/index.html',
+  CACHE_URL + '/StockTostado_IndianEcotrade.html',
   CACHE_URL + '/sw.js',
   'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js',
 ];
